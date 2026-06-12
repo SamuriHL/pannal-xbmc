@@ -35,6 +35,7 @@
 #include "guilib/GUITextureCallbackManager.h"
 #include "guilib/GUIWindowManager.h"
 #include "guilib/StereoscopicsManager.h"
+#include "interfaces/AnnouncementManager.h"
 #include "messaging/ApplicationMessenger.h"
 #include "messaging/helpers/DialogHelper.h"
 #include "resources/LocalizeStrings.h"
@@ -404,10 +405,19 @@ void CApplicationSkinHandling::ReloadSkin(bool confirm)
   CGUIMessage msg(GUI_MSG_LOAD_SKIN, -1, gui->GetWindowManager().GetActiveWindow());
   gui->GetWindowManager().SendMessage(msg);
 
+  // Let listeners (e.g. addons with their own custom windows) know the skin is about
+  // to be unloaded before the window manager tears their windows down, since the C++
+  // OnDeinitWindow path gives the script engine no way to react in time.
+  CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinUnloading");
+
   const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
   std::string newSkin = settings->GetString(CSettings::SETTING_LOOKANDFEEL_SKIN);
   if (LoadSkin(newSkin))
   {
+    // The new skin is up and the previous active window has been restored, so listeners
+    // can safely rebuild any windows they had open.
+    CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinLoaded");
+
     /* The Reset() or SetString() below will cause recursion, so the m_confirmSkinChange boolean is set so as to not prompt the
        user as to whether they want to keep the current skin. */
     if (confirm && m_confirmSkinChange)
@@ -429,18 +439,28 @@ void CApplicationSkinHandling::ReloadSkin(bool confirm)
     if (!setting)
     {
       CLog::Log(LOGFATAL, "Failed to load setting for: {}", CSettings::SETTING_LOOKANDFEEL_SKIN);
+      // nothing left to load - tell listeners the reload is over and failed so anyone that
+      // reacted to OnSkinUnloading doesn't wait forever
+      CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinLoadFailed");
       return;
     }
 
     std::string defaultSkin = std::static_pointer_cast<CSettingString>(setting)->GetDefault();
     if (newSkin != defaultSkin)
     {
+      // fall back to the default skin; that reload announces its own OnSkinLoaded, so we
+      // don't signal failure here - listeners should wait for the default to come up
       m_confirmSkinChange = false;
       setting->Reset();
       CGUIDialogKaiToast::QueueNotification(
           CGUIDialogKaiToast::Error,
           CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(24102),
           CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(24103));
+    }
+    else
+    {
+      // the default skin itself failed - nothing to fall back to
+      CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinLoadFailed");
     }
   }
   m_confirmSkinChange = true;
